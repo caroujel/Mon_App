@@ -1,0 +1,683 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Plus, Trash2, Check, Edit3, Download, Upload, Search, Filter, Calendar, Tag, ArrowUpDown, ListChecks, Layers2, RefreshCcw, CheckSquare, Square, X, ArrowUpNarrowWide, ArrowDownNarrowWide, Camera, ScanLine, ImagePlus } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import Tesseract from "tesseract.js";
+
+// ---------- Types ----------
+const PRIORITIES = ["Faible", "Moyenne", "Haute"] as const;
+const STATUSES = ["active", "complétée"] as const;
+
+/**
+ * @typedef {Object} Item
+ * @property {string} id
+ * @property {string} titre
+ * @property {string} notes
+ * @property {string} liste
+ * @property {"Faible"|"Moyenne"|"Haute"} priorite
+ * @property {string[]} tags
+ * @property {string|null} echeance // ISO Date
+ * @property {"active"|"complétée"} statut
+ * @property {number} creeLe // ts
+ */
+
+// ---------- Helpers ----------
+const uid = () => Math.random().toString(36).slice(2, 10);
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const load = (k, v) => {
+  try { return JSON.parse(localStorage.getItem(k) || "null") ?? v; } catch { return v; }
+};
+const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+
+const formatDate = (iso) => {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  } catch { return iso; }
+};
+
+const priorityBadge = (p) => {
+  const map = {
+    "Faible": "bg-emerald-100 text-emerald-700",
+    "Moyenne": "bg-amber-100 text-amber-700",
+    "Haute": "bg-rose-100 text-rose-700",
+  };
+  return <Badge className={`${map[p]} rounded-xl`}>{p}</Badge>;
+};
+
+// ---------- Main App ----------
+export default function ListeApp() {
+  const [items, setItems] = useState(() => load("liste.items", /** @type {Item[]} */([])));
+  const [listes, setListes] = useState(() => load("liste.listes", ["Ma liste"]));
+
+  const [draft, setDraft] = useState({
+    titre: "",
+    notes: "",
+    liste: "Ma liste",
+    priorite: "Moyenne",
+    tags: [],
+    echeance: "",
+  });
+
+  const [query, setQuery] = useState("");
+  const [filtreListe, setFiltreListe] = useState("toutes");
+  const [filtreStatut, setFiltreStatut] = useState("tous");
+  const [filtrePriorite, setFiltrePriorite] = useState("toutes");
+  const [tri, setTri] = useState({ cle: "creeLe", ordre: "desc" });
+  const [selection, setSelection] = useState(new Set());
+
+  const titreRef = useRef(null);
+  const rechercheRef = useRef(null);
+
+  useEffect(() => { save("liste.items", items); }, [items]);
+  useEffect(() => { save("liste.listes", listes); }, [listes]);
+
+  // Raccourcis clavier
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key.toLowerCase() === "n" && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        titreRef.current?.focus();
+      }
+      if (e.key.toLowerCase() === "f" && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        rechercheRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const listsOptions = useMemo(() => ["toutes", ...listes], [listes]);
+
+  const filtered = useMemo(() => {
+    let out = [...items];
+    if (query.trim()) {
+      const q = query.toLowerCase();
+      out = out.filter(it =>
+        it.titre.toLowerCase().includes(q) ||
+        it.notes.toLowerCase().includes(q) ||
+        it.tags.join(" ").toLowerCase().includes(q)
+      );
+    }
+    if (filtreListe !== "toutes") out = out.filter(it => it.liste === filtreListe);
+    if (filtreStatut !== "tous") out = out.filter(it => it.statut === filtreStatut);
+    if (filtrePriorite !== "toutes") out = out.filter(it => it.priorite === filtrePriorite);
+
+    const cmp = (a, b) => {
+      let va = a[tri.cle], vb = b[tri.cle];
+      if (tri.cle === "echeance" && (!va || !vb)) {
+        if (!va && !vb) return 0; if (!va) return 1; if (!vb) return -1;
+      }
+      if (tri.cle === "priorite") {
+        const order = { "Haute": 3, "Moyenne": 2, "Faible": 1 };
+        va = order[va]; vb = order[vb];
+      }
+      if (typeof va === "string") va = va.toString().toLowerCase();
+      if (typeof vb === "string") vb = vb.toString().toLowerCase();
+      if (va < vb) return tri.ordre === "asc" ? -1 : 1;
+      if (va > vb) return tri.ordre === "asc" ? 1 : -1;
+      return 0;
+    };
+    out.sort(cmp);
+    return out;
+  }, [items, query, filtreListe, filtrePriorite, filtreStatut, tri]);
+
+  const clearDraft = () => setDraft({ titre: "", notes: "", liste: listes[0] || "Ma liste", priorite: "Moyenne", tags: [], echeance: "" });
+
+  const addItem = () => {
+    if (!draft.titre.trim()) return;
+    const it = {
+      id: uid(),
+      titre: draft.titre.trim(),
+      notes: draft.notes.trim(),
+      liste: draft.liste,
+      priorite: draft.priorite,
+      tags: draft.tags,
+      echeance: draft.echeance || null,
+      statut: "active",
+      creeLe: Date.now(),
+    };
+    setItems(prev => [it, ...prev]);
+    clearDraft();
+    titreRef.current?.focus();
+  };
+
+  const toggle = (id) => setItems(prev => prev.map(it => it.id === id ? { ...it, statut: it.statut === "active" ? "complétée" : "active" } : it));
+  const remove = (ids) => setItems(prev => prev.filter(it => !ids.includes(it.id)));
+  const update = (id, patch) => setItems(prev => prev.map(it => it.id === id ? { ...it, ...patch } : it));
+
+  const onBulkComplete = () => {
+    setItems(prev => prev.map(it => selection.has(it.id) ? { ...it, statut: "complétée" } : it));
+    setSelection(new Set());
+  };
+  const onBulkDelete = () => {
+    remove([...selection]);
+    setSelection(new Set());
+  };
+  const allSelectedOnPage = filtered.every(it => selection.has(it.id)) && filtered.length > 0;
+
+  const exportJSON = () => {
+    const blob = new Blob([JSON.stringify({ items, listes }, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `liste-export-${new Date().toISOString().slice(0,10)}.json`;
+    a.click(); URL.revokeObjectURL(url);
+  };
+
+  const importRef = useRef(null);
+  const onImport = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(String(reader.result || "{}"));
+        if (Array.isArray(data.items)) setItems(data.items);
+        if (Array.isArray(data.listes)) setListes(data.listes);
+      } catch (e) { alert("Fichier invalide"); }
+    };
+    reader.readAsText(file);
+  };
+
+  const overdue = (it) => it.echeance && new Date(it.echeance) < new Date(todayISO()) && it.statut !== "complétée";
+
+  return (
+    <div className="min-h-screen w-full bg-gradient-to-b from-slate-50 to-slate-100 p-4 md:p-8">
+      <div className="mx-auto max-w-6xl grid grid-cols-1 gap-4">
+        {/* Header */}
+        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+          <h1 className="text-3xl font-semibold tracking-tight flex items-center gap-3"><ListChecks className="h-8 w-8"/> Gestionnaire de liste</h1>
+          <div className=\"flex items-center gap-2\">
+            <ScanDialog listes={listes} onImport={(targetList, lines)=> { const now = Date.now(); const newItems = lines.map((t,i)=> ({ id: uid(), titre: t, notes: \"\", liste: targetList, priorite: \"Moyenne\", tags: [], echeance: null, statut: \"active\", creeLe: now - i })); setItems(prev => [...newItems, ...prev]); }} />
+            <Button variant="outline" onClick={() => setItems([])} title="Vider toutes les tâches"><RefreshCcw className="mr-2 h-4 w-4"/>Réinitialiser</Button>
+            <Button variant="outline" onClick={exportJSON} title="Exporter en JSON"><Download className="mr-2 h-4 w-4"/>Exporter</Button>
+
+            <Button variant="outline" onClick={() => importRef.current?.click()} title="Importer depuis JSON"><Upload className="mr-2 h-4 w-4"/>Importer</Button>
+            <input ref={importRef} type="file" accept="application/json" className="hidden" onChange={(e)=> onImport(e.target.files?.[0])}/>
+          </div>
+        </div>
+
+        {/* Nouvelle tâche */}
+        <Card className="rounded-2xl shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-lg">Ajouter un élément</CardTitle>
+          </CardHeader>
+          <CardContent className="grid md:grid-cols-12 gap-3">
+            <div className="md:col-span-5">
+              <Label htmlFor="titre">Titre</Label>
+              <Input id="titre" ref={titreRef} placeholder="Ex: Acheter du lait" value={draft.titre} onChange={(e)=> setDraft(d=>({...d, titre: e.target.value}))}/>
+            </div>
+            <div className="md:col-span-3">
+              <Label>Liste</Label>
+              <div className="flex gap-2">
+                <Select value={draft.liste} onValueChange={(v)=> setDraft(d=>({...d, liste: v}))}>
+                  <SelectTrigger><SelectValue placeholder="Choisir"/></SelectTrigger>
+                  <SelectContent>
+                    {listes.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <Dialog>
+                  <DialogTrigger asChild>
+                    <Button variant="secondary"><Layers2 className="h-4 w-4 mr-2"/>Nouvelle</Button>
+                  </DialogTrigger>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle>Créer une liste</DialogTitle>
+                    </DialogHeader>
+                    <NewListForm onCreate={(name)=> { if (!listes.includes(name)) setListes([...listes, name]); setDraft(d=>({...d, liste: name})); }}/>
+                  </DialogContent>
+                </Dialog>
+              </div>
+            </div>
+            <div className="md:col-span-2">
+              <Label>Priorité</Label>
+              <Select value={draft.priorite} onValueChange={(v)=> setDraft(d=>({...d, priorite: v}))}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {PRIORITIES.map(p => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="md:col-span-2">
+              <Label>Échéance</Label>
+              <div className="relative">
+                <Input type="date" value={draft.echeance} onChange={(e)=> setDraft(d=>({...d, echeance: e.target.value}))}/>
+                <Calendar className="absolute right-2 top-2.5 h-4 w-4 opacity-60"/>
+              </div>
+            </div>
+            <div className="md:col-span-12">
+              <Label>Notes</Label>
+              <Textarea rows={2} placeholder="Détails, liens, etc." value={draft.notes} onChange={(e)=> setDraft(d=>({...d, notes: e.target.value}))}/>
+            </div>
+            <div className="md:col-span-12 flex items-center justify-between">
+              <TagEditor value={draft.tags} onChange={(tags)=> setDraft(d=>({...d, tags}))}/>
+              <Button onClick={addItem}><Plus className="h-4 w-4 mr-2"/>Ajouter</Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Barre d'outils */}
+        <Card className="rounded-2xl shadow-sm">
+          <CardContent className="pt-6 flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
+            <div className="flex gap-2 items-center w-full md:w-auto">
+              <div className="relative w-full md:w-72">
+                <Input ref={rechercheRef} placeholder="Rechercher (⌨ f)" value={query} onChange={(e)=> setQuery(e.target.value)} className="pl-9"/>
+                <Search className="absolute left-2 top-2.5 h-4 w-4 opacity-60"/>
+              </div>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline"><Filter className="h-4 w-4 mr-2"/>Filtres</Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  <DropdownMenuLabel>Liste</DropdownMenuLabel>
+                  <div className="px-2 pb-2">
+                    <Select value={filtreListe} onValueChange={setFiltreListe}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {listsOptions.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <DropdownMenuSeparator/>
+                  <DropdownMenuLabel>Statut</DropdownMenuLabel>
+                  <div className="px-2 pb-2">
+                    <Select value={filtreStatut} onValueChange={setFiltreStatut}>
+                      <SelectTrigger><SelectValue placeholder="tous"/></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="tous">Tous</SelectItem>
+                        {STATUSES.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <DropdownMenuSeparator/>
+                  <DropdownMenuLabel>Priorité</DropdownMenuLabel>
+                  <div className="px-2 pb-2">
+                    <Select value={filtrePriorite} onValueChange={setFiltrePriorite}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="toutes">Toutes</SelectItem>
+                        {PRIORITIES.map(p => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline"><ArrowUpDown className="h-4 w-4 mr-2"/>Trier</Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent>
+                  {[
+                    { cle: "creeLe", label: "Date de création" },
+                    { cle: "echeance", label: "Échéance" },
+                    { cle: "priorite", label: "Priorité" },
+                    { cle: "titre", label: "Titre" },
+                  ].map(opt => (
+                    <DropdownMenuItem key={opt.cle} onClick={()=> setTri(t => ({ ...t, cle: opt.cle }))}>
+                      {opt.label}
+                    </DropdownMenuItem>
+                  ))}
+                  <DropdownMenuSeparator/>
+                  <DropdownMenuItem onClick={()=> setTri(t=> ({...t, ordre: t.ordre === "asc" ? "desc" : "asc"}))}>
+                    {tri.ordre === "asc" ? <ArrowDownNarrowWide className="h-4 w-4 mr-2"/> : <ArrowUpNarrowWide className="h-4 w-4 mr-2"/>}
+                    {tri.ordre === "asc" ? "Ascendant" : "Descendant"}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+
+            {/* Actions groupées */}
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" onClick={() => {
+                const all = new Set(selection);
+                filtered.forEach(it => all.add(it.id));
+                setSelection(all);
+              }}>
+                <CheckSquare className="h-4 w-4 mr-2"/>Tout sélectionner
+              </Button>
+              <Button variant="outline" onClick={()=> setSelection(new Set())}>
+                <Square className="h-4 w-4 mr-2"/>Tout désélectionner
+              </Button>
+              <Button variant="outline" onClick={onBulkComplete} disabled={selection.size === 0}><Check className="h-4 w-4 mr-2"/>Marquer fait</Button>
+              <Button variant="destructive" onClick={onBulkDelete} disabled={selection.size === 0}><Trash2 className="h-4 w-4 mr-2"/>Supprimer</Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Liste des éléments */}
+        <div className="grid gap-3">
+          <AnimatePresence initial={false}>
+            {filtered.map((it) => (
+              <motion.div key={it.id} layout initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
+                <Card className={`rounded-2xl shadow-sm border ${overdue(it) ? "border-rose-300" : ""}`}>
+                  <CardContent className="p-4">
+                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                      <div className="flex items-start gap-3">
+                        <Checkbox checked={selection.has(it.id)} onCheckedChange={(v)=> {
+                          const s = new Set(selection); v ? s.add(it.id) : s.delete(it.id); setSelection(s);
+                        }}/>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <button onClick={()=> toggle(it.id)} className={`rounded-lg px-2 py-1 text-sm border ${it.statut === "complétée" ? "bg-emerald-50 border-emerald-200" : "bg-slate-50"}`}>
+                              {it.statut === "complétée" ? <span className="flex items-center gap-1"><Check className="h-4 w-4"/>Fait</span> : "À faire"}
+                            </button>
+                            {priorityBadge(it.priorite)}
+                            {it.echeance && (
+                              <Badge className={`rounded-xl ${overdue(it) ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-700"}`}>
+                                <Calendar className="h-3.5 w-3.5 mr-1"/>{formatDate(it.echeance)}
+                              </Badge>
+                            )}
+                            <Badge variant="secondary" className="rounded-xl"><Layers2 className="h-3.5 w-3.5 mr-1"/>{it.liste}</Badge>
+                          </div>
+                          <h3 className={`mt-1 text-lg font-medium ${it.statut === "complétée" ? "line-through text-slate-400" : ""}`}>{it.titre}</h3>
+                          {it.notes && <p className="text-sm text-slate-600 mt-1 whitespace-pre-wrap">{it.notes}</p>}
+                          <div className="flex flex-wrap gap-1 mt-2">
+                            {it.tags.map(t => <Badge key={t} className="rounded-xl bg-slate-100 text-slate-800"><Tag className="h-3.5 w-3.5 mr-1"/>{t}</Badge>)}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <EditItem it={it} onSave={(patch)=> update(it.id, patch)} onDelete={()=> remove([it.id])}/>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </motion.div>
+            ))}
+          </AnimatePresence>
+          {filtered.length === 0 && (
+            <Card className="rounded-2xl">
+              <CardContent className="p-8 text-center text-slate-500">
+                Aucune entrée ne correspond à vos filtres.
+              </CardContent>
+            </Card>
+          )}
+        </div>
+
+        {/* Pied de page */}
+        <div className="text-xs text-slate-500 text-center mt-6">
+          Astuces : tapez <kbd className="px-1 py-0.5 bg-slate-200 rounded">n</kbd> pour ajouter rapidement, <kbd className="px-1 py-0.5 bg-slate-200 rounded">f</kbd> pour rechercher.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NewListForm({ onCreate }) {
+  const [name, setName] = useState("");
+  return (
+    <div className="space-y-4">
+      <div>
+        <Label>Nom de la liste</Label>
+        <Input value={name} onChange={(e)=> setName(e.target.value)} placeholder="Ex: Courses"/>
+      </div>
+      <DialogFooter>
+        <Button onClick={()=> { if (name.trim()) { onCreate(name.trim()); }}}>Créer</Button>
+      </DialogFooter>
+    </div>
+  );
+}
+
+function TagEditor({ value, onChange }) {
+  const [input, setInput] = useState("");
+  const add = () => {
+    const t = input.trim(); if (!t) return; if (!value.includes(t)) onChange([...value, t]); setInput("");
+  };
+  const remove = (t) => onChange(value.filter(x => x !== t));
+  return (
+    <div className="flex items-center gap-2 w-full">
+      <div className="flex flex-wrap gap-2">
+        {value.map(t => (
+          <Badge key={t} className="rounded-xl bg-slate-100 text-slate-800">
+            <div className="flex items-center gap-1">
+              <Tag className="h-3.5 w-3.5"/>
+              <span>{t}</span>
+              <button className="ml-1 opacity-60 hover:opacity-100" onClick={()=> remove(t)} title="Retirer">✕</button>
+            </div>
+          </Badge>
+        ))}
+      </div>
+      <div className="flex items-center gap-2 ml-auto">
+        <Input placeholder="Ajouter un tag" value={input} onChange={(e)=> setInput(e.target.value)} onKeyDown={(e)=> { if (e.key === "Enter") add(); }}/>
+        <Button variant="secondary" onClick={add}>Ajouter</Button>
+      </div>
+    </div>
+  );
+}
+
+function EditItem({ it, onSave, onDelete }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({ ...it, echeance: it.echeance || "" });
+  useEffect(() => setForm({ ...it, echeance: it.echeance || "" }), [it]);
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline"><Edit3 className="h-4 w-4 mr-2"/>Modifier</Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Modifier l'élément</DialogTitle>
+        </DialogHeader>
+        <div className="grid md:grid-cols-12 gap-3">
+          <div className="md:col-span-6">
+            <Label>Titre</Label>
+            <Input value={form.titre} onChange={(e)=> setForm(f=> ({...f, titre: e.target.value}))}/>
+          </div>
+          <div className="md:col-span-3">
+            <Label>Liste</Label>
+            <Input value={form.liste} onChange={(e)=> setForm(f=> ({...f, liste: e.target.value}))}/>
+          </div>
+          <div className="md:col-span-3">
+            <Label>Priorité</Label>
+            <Select value={form.priorite} onValueChange={(v)=> setForm(f=> ({...f, priorite: v}))}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {PRIORITIES.map(p => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="md:col-span-4">
+            <Label>Échéance</Label>
+            <Input type="date" value={form.echeance} onChange={(e)=> setForm(f=> ({...f, echeance: e.target.value}))}/>
+          </div>
+          <div className="md:col-span-4">
+            <Label>Statut</Label>
+            <Select value={form.statut} onValueChange={(v)=> setForm(f=> ({...f, statut: v}))}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {STATUSES.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="md:col-span-4">
+            <Label>Tags (séparés par des virgules)</Label>
+            <Input value={form.tags.join(", ")} onChange={(e)=> setForm(f=> ({...f, tags: e.target.value.split(",").map(x=> x.trim()).filter(Boolean)}))}/>
+          </div>
+          <div className="md:col-span-12">
+            <Label>Notes</Label>
+            <Textarea rows={4} value={form.notes} onChange={(e)=> setForm(f=> ({...f, notes: e.target.value}))}/>
+          </div>
+        </div>
+        <DialogFooter>
+          <div className="flex items-center gap-2 ml-auto">
+            <Button variant="destructive" onClick={()=> { onDelete(); setOpen(false); }}><Trash2 className="h-4 w-4 mr-2"/>Supprimer</Button>
+            <Button onClick={()=> { onSave({ ...form, echeance: form.echeance || null }); setOpen(false); }}>
+              <Check className="h-4 w-4 mr-2"/>Enregistrer
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ScanDialog({ listes, onImport }) {
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState("camera");
+  const [image, setImage] = useState("");
+  const [text, setText] = useState("");
+  const [lines, setLines] = useState([]);
+  const [selected, setSelected] = useState(new Set());
+  const [targetList, setTargetList] = useState(listes[0] || "Ma liste");
+  const [working, setWorking] = useState(false);
+  const [lang, setLang] = useState("fra");
+
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const fileRef = useRef(null);
+
+  useEffect(()=> { if (!open) stopCamera(); }, [open]);
+
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+    } catch (e) { alert("Caméra indisponible : " + e.message); }
+  };
+  const stopCamera = () => {
+    const v = videoRef.current; const s = v?.srcObject; const tracks = (s && s.getTracks) ? s.getTracks() : [];
+    tracks.forEach(t => t.stop());
+    if (v) v.srcObject = null;
+  };
+  const capture = () => {
+    const v = videoRef.current; const c = canvasRef.current; if (!v || !c) return;
+    c.width = v.videoWidth; c.height = v.videoHeight;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(v, 0, 0);
+    const data = c.toDataURL("image/png");
+    setImage(data);
+  };
+  const onFile = (f) => {
+    if (!f) return; const r = new FileReader();
+    r.onload = () => setImage(String(r.result));
+    r.readAsDataURL(f);
+  };
+
+  const runOCR = async () => {
+    if (!image) return; setWorking(true); setText(""); setLines([]); setSelected(new Set());
+    try {
+      const res = await Tesseract.recognize(image, lang, { logger: () => {} });
+      const tx = (res && res.data && res.data.text) ? res.data.text : "";
+      setText(tx);
+      const ls = tx.split("
+").map(x => x.trim()).filter(Boolean);
+      setLines(ls);
+      setSelected(new Set(ls));
+    } catch (e) {
+      alert("Échec OCR : " + e.message + "
+Astuce : essayez en lumière forte et photo bien droite.");
+    } finally { setWorking(false); }
+  };
+
+  const toggleLine = (l) => {
+    const s = new Set(selected); if (s.has(l)) s.delete(l); else s.add(l); setSelected(s);
+  };
+
+  const importNow = () => {
+    if (selected.size === 0) return;
+    onImport(targetList, Array.from(selected));
+    setOpen(false); setImage(""); setText(""); setLines([]); setSelected(new Set());
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="default" title="Scanner une liste papier"><Camera className="mr-2 h-4 w-4"/>Scanner</Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>Scanner une liste papier</DialogTitle>
+        </DialogHeader>
+        <div className="grid md:grid-cols-12 gap-3">
+          <div className="md:col-span-12 flex items-center gap-2">
+            <Label>Ajouter dans</Label>
+            <Select value={targetList} onValueChange={setTargetList}>
+              <SelectTrigger className="w-48"><SelectValue/></SelectTrigger>
+              <SelectContent>
+                {listes.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <div className="ml-auto flex items-center gap-2">
+              <Label>Langue OCR</Label>
+              <Select value={lang} onValueChange={setLang}>
+                <SelectTrigger className="w-28"><SelectValue/></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="fra">Français</SelectItem>
+                  <SelectItem value="eng">English</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <div className="md:col-span-12 flex flex-wrap gap-2">
+            <Button variant={mode === "camera" ? "secondary" : "outline"} onClick={()=> { setMode("camera"); startCamera(); }}><Camera className="h-4 w-4 mr-2"/>Caméra</Button>
+            <Button variant={mode === "fichier" ? "secondary" : "outline"} onClick={()=> { setMode("fichier"); stopCamera(); }}><ImagePlus className="h-4 w-4 mr-2"/>Image</Button>
+          </div>
+
+          {mode === "camera" && (
+            <div className="md:col-span-12 space-y-2">
+              <video ref={videoRef} className="w-full rounded-xl bg-black/5" playsInline muted />
+              <canvas ref={canvasRef} className="hidden"/>
+              <div className="flex gap-2">
+                <Button onClick={startCamera} variant="outline">Activer</Button>
+                <Button onClick={capture}><ScanLine className="h-4 w-4 mr-2"/>Capturer</Button>
+                <Button onClick={stopCamera} variant="ghost">Couper</Button>
+              </div>
+            </div>
+          )}
+
+          {mode === "fichier" && (
+            <div className="md:col-span-12 space-y-2">
+              <input type="file" accept="image/*" ref={fileRef} className="hidden" onChange={(e)=> onFile(e.target.files?.[0])}/>
+              <Button variant="outline" onClick={()=> fileRef.current?.click()}><ImagePlus className="h-4 w-4 mr-2"/>Choisir une image</Button>
+            </div>
+          )}
+
+          {image && (
+            <div className="md:col-span-12">
+              <img src={image} alt="capture" className="max-h-72 rounded-xl border"/>
+            </div>
+          )}
+
+          <div className="md:col-span-12 flex items-center gap-2">
+            <Button onClick={runOCR} disabled={!image || working}><ScanLine className="h-4 w-4 mr-2"/>{working ? "Analyse en cours…" : "Lancer l'OCR"}</Button>
+            {text && <span className="text-xs text-slate-500">Texte détecté : {text.slice(0, 80)}{text.length>80?"…":""}</span>}
+          </div>
+
+          {lines.length > 0 && (
+            <div className="md:col-span-12">
+              <Label className="mb-2 block">Éléments trouvés</Label>
+              <div className="max-h-48 overflow-auto rounded-xl border p-2 space-y-1 bg-slate-50">
+                {lines.map(l => (
+                  <label key={l} className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={selected.has(l)} onChange={()=> toggleLine(l)}/>
+                    <span>{l}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button onClick={importNow} disabled={selected.size===0}>Importer {selected.size>0?`(${selected.size})`:""}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
