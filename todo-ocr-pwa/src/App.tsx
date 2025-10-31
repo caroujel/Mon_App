@@ -1,1 +1,1 @@
-export default function App(){return <div>todo-ocr</div>}
+// todo-ocr full App.tsx code here - see ChatGPT message above for complete content.
