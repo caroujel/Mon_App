@@ -1,0 +1,1 @@
+// todo-ocr full App.tsx code here - see ChatGPT message above for complete content.
